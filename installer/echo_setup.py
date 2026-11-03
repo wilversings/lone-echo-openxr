@@ -48,6 +48,20 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def find_case_insensitive(directory, filename):
+    """Find a file case-insensitively. Returns the actual Path if found, else None."""
+    if os.name == 'nt':
+        path = directory / filename
+        return path if path.exists() else None
+    try:
+        for entry in directory.iterdir():
+            if entry.name.lower() == filename.lower():
+                return entry
+    except OSError:
+        pass
+    return None
+
+
 def atomic(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix='.' + path.name, dir=path.parent)
@@ -263,7 +277,12 @@ def install(args):
     if not (root/'_data').is_dir():
         raise ValueError(f'Missing game data folder: {root / "_data"}. Copy the complete game installation folder.')
     bindir = root/meta['bin']
-    prepared = [(bindir/spec['file'], patch((bindir/spec['file']).read_bytes(),spec)) for spec in meta['patches']]
+    prepared = []
+    for spec in meta['patches']:
+        target = find_case_insensitive(bindir, spec['file'])
+        if target is None:
+            raise ValueError(f'Missing file: {spec["file"]} (searched in {bindir}). Ensure the game folder was copied completely.')
+        prepared.append((target, patch(target.read_bytes(), spec)))
     payload = json.loads((ROOT/'payload/manifest.json').read_text())
     if set(payload) != {'LibOVRRT64_1.dll','LibOVRPlatform64_1.dll','openxr_loader.dll'}:
         raise ValueError('The release payload is incomplete or unexpected')
@@ -347,10 +366,13 @@ def launch(args):
         raise ValueError('Installation is incomplete. Uninstall and reinstall.')
     meta = GAMES[game]
     root = Path(state['game_dir'])
-    executable = root/meta['bin']/meta['exe']
+    bindir = root/meta['bin']
+    exe_path = find_case_insensitive(bindir, meta['exe'])
+    if exe_path is None:
+        raise ValueError(f'Missing executable: {meta["exe"]} (searched in {bindir})')
     for entry in state['files']:
         path=Path(entry['path'])
-        if path.parent==executable.parent and (not path.is_file() or digest(path.read_bytes())!=entry['installed']):
+        if path.parent==bindir and (not path.is_file() or digest(path.read_bytes())!=entry['installed']):
             raise ValueError(f'Installed file changed or is missing: {path}')
     env = os.environ.copy()
     env['LONE_ECHO_RENDERER'] = meta['renderer']
@@ -362,7 +384,7 @@ def launch(args):
     if args.diagnostics:
         env.update(LIBOVR_OPENXR_LOG='1',XR_LOADER_DEBUG='all')
     if os.name == 'nt':
-        command = [str(executable)]
+        command = [str(exe_path)]
     else:
         proton = Path(state['proton'])
         prefix = ROOT/'userdata'/game/'proton'
